@@ -22,6 +22,8 @@
 #include <linux/input/sparse-keymap.h>
 #include <linux/platform_device.h>
 #include <linux/platform_profile.h>
+#include <linux/version.h>
+#include <linux/bitmap.h>
 #include <linux/hwmon.h>
 #include <linux/acpi.h>
 #include <linux/mutex.h>
@@ -349,13 +351,18 @@ static DEFINE_MUTEX(active_platform_profile_lock);
 static struct input_dev *hp_wmi_input_dev;
 static struct input_dev *camera_shutter_input_dev;
 static struct platform_device *hp_wmi_platform_dev;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,13,0)
 static struct device *platform_profile_device;
+#endif
 static struct notifier_block platform_power_source_nb;
 static struct hp_mc_leds hp_multicolor_leds;
 static struct hp_fan_control hp_fan_control;
 static enum platform_profile_option active_platform_profile;
 static bool force_fan_control_support;
 static bool platform_profile_support;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,13,0)
+static struct platform_profile_handler platform_profile_handler;
+#endif
 static bool zero_insize_support;
 
 module_param(force_fan_control_support, bool, 0444);
@@ -2164,6 +2171,7 @@ static inline void victus_s_unregister_powersource_event_handler(void)
 	unregister_acpi_notifier(&platform_power_source_nb);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,13,0)
 static const struct platform_profile_ops platform_profile_omen_ops = {
 	.probe = hp_wmi_platform_profile_probe,
 	.profile_get = platform_profile_omen_get,
@@ -2260,6 +2268,115 @@ static int thermal_profile_setup(struct platform_device *device)
 
 	return 0;
 }
+#else
+static int platform_profile_omen_get_legacy(struct platform_profile_handler *pprof,
+				       enum platform_profile_option *profile)
+{
+	return platform_profile_omen_get(NULL, profile);
+}
+
+static int platform_profile_omen_set_legacy(struct platform_profile_handler *pprof,
+				       enum platform_profile_option profile)
+{
+	return platform_profile_omen_set(NULL, profile);
+}
+
+static int platform_profile_victus_get_legacy(struct platform_profile_handler *pprof,
+					 enum platform_profile_option *profile)
+{
+	return platform_profile_victus_get(NULL, profile);
+}
+
+static int platform_profile_victus_set_legacy(struct platform_profile_handler *pprof,
+					 enum platform_profile_option profile)
+{
+	return platform_profile_victus_set(NULL, profile);
+}
+
+static int platform_profile_victus_s_set_legacy(struct platform_profile_handler *pprof,
+					    enum platform_profile_option profile)
+{
+	return platform_profile_victus_s_set(NULL, profile);
+}
+
+static int hp_wmi_platform_profile_get_legacy(struct platform_profile_handler *pprof,
+					    enum platform_profile_option *profile)
+{
+	return hp_wmi_platform_profile_get(NULL, profile);
+}
+
+static int hp_wmi_platform_profile_set_legacy(struct platform_profile_handler *pprof,
+					    enum platform_profile_option profile)
+{
+	return hp_wmi_platform_profile_set(NULL, profile);
+}
+
+static void hp_wmi_platform_profile_prepare_choices(void)
+{
+	bitmap_zero(platform_profile_handler.choices, PLATFORM_PROFILE_LAST);
+	hp_wmi_platform_profile_probe(NULL, platform_profile_handler.choices);
+}
+
+static int thermal_profile_setup(void)
+{
+	int err, tp;
+
+	hp_wmi_platform_profile_prepare_choices();
+
+	if (is_omen_thermal_profile()) {
+		err = platform_profile_omen_get_ec(&active_platform_profile);
+		if (err < 0)
+			return err;
+
+		err = platform_profile_omen_set_ec(active_platform_profile);
+		if (err < 0)
+			return err;
+
+		platform_profile_handler.profile_get = platform_profile_omen_get_legacy;
+		platform_profile_handler.profile_set = platform_profile_omen_set_legacy;
+	} else if (is_victus_thermal_profile()) {
+		err = platform_profile_victus_get_ec(&active_platform_profile);
+		if (err < 0)
+			return err;
+
+		err = platform_profile_victus_set_ec(active_platform_profile);
+		if (err < 0)
+			return err;
+
+		platform_profile_handler.profile_get = platform_profile_victus_get_legacy;
+		platform_profile_handler.profile_set = platform_profile_victus_set_legacy;
+	} else if (is_victus_s_thermal_profile()) {
+		active_platform_profile = PLATFORM_PROFILE_BALANCED;
+
+		err = platform_profile_victus_s_set_ec(active_platform_profile);
+		if (err < 0)
+			return err;
+
+		platform_profile_handler.profile_get = platform_profile_omen_get_legacy;
+		platform_profile_handler.profile_set = platform_profile_victus_s_set_legacy;
+	} else {
+		tp = thermal_profile_get();
+		if (tp < 0)
+			return tp;
+
+		err = thermal_profile_set(tp);
+		if (err)
+			return err;
+
+		platform_profile_handler.profile_get = hp_wmi_platform_profile_get_legacy;
+		platform_profile_handler.profile_set = hp_wmi_platform_profile_set_legacy;
+	}
+
+	err = platform_profile_register(&platform_profile_handler);
+	if (err)
+		return err;
+
+	pr_info("Registered as platform profile handler\n");
+	platform_profile_support = true;
+
+	return 0;
+}
+#endif
 
 static int hp_wmi_hwmon_init(void);
 
@@ -2290,7 +2407,13 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 	if (err < 0)
 		return err;
 
-	thermal_profile_setup(device);
+	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,13,0)
+	err = thermal_profile_setup(device);
+	#else
+	err = thermal_profile_setup();
+	#endif
+	if (err < 0)
+		return err;
 	hp_kbd_rgb_setup();
 
 
@@ -2318,6 +2441,10 @@ static void __exit hp_wmi_bios_remove(struct platform_device *device)
 		rfkill_unregister(wwan_rfkill);
 		rfkill_destroy(wwan_rfkill);
 	}
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,13,0)
+	if (platform_profile_support)
+		platform_profile_remove();
+#endif
 }
 
 static int hp_wmi_resume_handler(struct device *device)
