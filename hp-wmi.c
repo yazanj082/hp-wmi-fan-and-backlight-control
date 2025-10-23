@@ -351,7 +351,7 @@ static DEFINE_MUTEX(active_platform_profile_lock);
 static struct input_dev *hp_wmi_input_dev;
 static struct input_dev *camera_shutter_input_dev;
 static struct platform_device *hp_wmi_platform_dev;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,13,0)
+#if defined(HPWMI_HAVE_DEVM_PLATFORM_PROFILE) && (HPWMI_HAVE_DEVM_PLATFORM_PROFILE+0)
 static struct device *platform_profile_device;
 #endif
 static struct notifier_block platform_power_source_nb;
@@ -360,7 +360,7 @@ static struct hp_fan_control hp_fan_control;
 static enum platform_profile_option active_platform_profile;
 static bool force_fan_control_support;
 static bool platform_profile_support;
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,13,0)
+#if !((defined(HPWMI_HAVE_DEVM_PLATFORM_PROFILE) && (HPWMI_HAVE_DEVM_PLATFORM_PROFILE+0)))
 static struct platform_profile_handler platform_profile_handler;
 #endif
 static bool zero_insize_support;
@@ -2171,7 +2171,7 @@ static inline void victus_s_unregister_powersource_event_handler(void)
 	unregister_acpi_notifier(&platform_power_source_nb);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,13,0)
+#if defined(HPWMI_HAVE_DEVM_PLATFORM_PROFILE) && (HPWMI_HAVE_DEVM_PLATFORM_PROFILE+0)
 static const struct platform_profile_ops platform_profile_omen_ops = {
 	.probe = hp_wmi_platform_profile_probe,
 	.profile_get = platform_profile_omen_get,
@@ -2407,7 +2407,7 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 	if (err < 0)
 		return err;
 
-	#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,13,0)
+	#if defined(HPWMI_HAVE_DEVM_PLATFORM_PROFILE) && (HPWMI_HAVE_DEVM_PLATFORM_PROFILE+0)
 	err = thermal_profile_setup(device);
 	#else
 	err = thermal_profile_setup();
@@ -2441,7 +2441,7 @@ static void __exit hp_wmi_bios_remove(struct platform_device *device)
 		rfkill_unregister(wwan_rfkill);
 		rfkill_destroy(wwan_rfkill);
 	}
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6,13,0)
+#if !((defined(HPWMI_HAVE_DEVM_PLATFORM_PROFILE) && (HPWMI_HAVE_DEVM_PLATFORM_PROFILE+0)))
 	if (platform_profile_support)
 		platform_profile_remove();
 #endif

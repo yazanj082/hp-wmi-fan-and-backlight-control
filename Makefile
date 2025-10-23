@@ -11,6 +11,13 @@ VERSION := $(shell grep -oP 'PACKAGE_VERSION="\K[^"]+' dkms.conf)
 # Current directory
 PWD := $(shell pwd)
 
+# Detect availability of the devm_platform_profile_register API in kernel headers
+PLATFORM_PROFILE_HDR := $(KDIR)/include/linux/platform_profile.h
+HPWMI_HAVE_DEVM_PLATFORM_PROFILE := $(shell [ -r $(PLATFORM_PROFILE_HDR) ] && grep -q "devm_platform_profile_register" $(PLATFORM_PROFILE_HDR) && echo 1 || echo 0)
+
+# Propagate feature flag to the module build
+ccflags-y += -DHPWMI_HAVE_DEVM_PLATFORM_PROFILE=$(HPWMI_HAVE_DEVM_PLATFORM_PROFILE)
+
 # Default target
 all:
 	$(MAKE) -C $(KDIR) M=$(PWD) modules
