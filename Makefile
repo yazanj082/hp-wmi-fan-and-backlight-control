@@ -2,8 +2,9 @@
 # Module name
 obj-m += hp-wmi.o
 
-# Kernel build directory
-KDIR := /lib/modules/$(shell uname -r)/build
+# Kernel build directory (respect the kernel we are building for)
+TARGET_KERNEL_RELEASE := $(if $(KERNELRELEASE),$(KERNELRELEASE),$(shell uname -r))
+KDIR := /lib/modules/$(TARGET_KERNEL_RELEASE)/build
 
 PKGNAME := $(shell grep -oP 'PACKAGE_NAME="\K[^"]+' dkms.conf)
 VERSION := $(shell grep -oP 'PACKAGE_VERSION="\K[^"]+' dkms.conf)
