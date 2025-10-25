@@ -2198,13 +2198,13 @@ static const struct platform_profile_ops hp_wmi_platform_profile_ops = {
 
 static int thermal_profile_setup(struct platform_device *device)
 {
-	const struct platform_profile_ops *ops;
+	const struct platform_profile_ops *ops = NULL;
 	int err, tp;
 
 	if (is_omen_thermal_profile()) {
 		err = platform_profile_omen_get_ec(&active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		/*
 		 * call thermal profile write command to ensure that the
@@ -2212,13 +2212,13 @@ static int thermal_profile_setup(struct platform_device *device)
 		 */
 		err = platform_profile_omen_set_ec(active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		ops = &platform_profile_omen_ops;
 	} else if (is_victus_thermal_profile()) {
 		err = platform_profile_victus_get_ec(&active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		/*
 		 * call thermal profile write command to ensure that the
@@ -2226,7 +2226,7 @@ static int thermal_profile_setup(struct platform_device *device)
 		 */
 		err = platform_profile_victus_set_ec(active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		ops = &platform_profile_victus_ops;
 	} else if (is_victus_s_thermal_profile()) {
@@ -2238,14 +2238,16 @@ static int thermal_profile_setup(struct platform_device *device)
 
 		err = platform_profile_victus_s_set_ec(active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		ops = &platform_profile_victus_s_ops;
 	} else {
 		tp = thermal_profile_get();
 
-		if (tp < 0)
-			return tp;
+		if (tp < 0) {
+			err = tp;
+			goto disable_profile;
+		}
 
 		/*
 		 * call thermal profile write command to ensure that the
@@ -2253,19 +2255,26 @@ static int thermal_profile_setup(struct platform_device *device)
 		 */
 		err = thermal_profile_set(tp);
 		if (err)
-			return err;
+			goto disable_profile;
 
 		ops = &hp_wmi_platform_profile_ops;
 	}
 
 	platform_profile_device = devm_platform_profile_register(&device->dev, "hp-wmi",
 								 NULL, ops);
-	if (IS_ERR(platform_profile_device))
-		return PTR_ERR(platform_profile_device);
+	if (IS_ERR(platform_profile_device)) {
+		err = PTR_ERR(platform_profile_device);
+		goto disable_profile;
+	}
 
 	pr_info("Registered as platform profile handler\n");
 	platform_profile_support = true;
 
+	return 0;
+
+disable_profile:
+	pr_warn("Platform profile init failed (%d); continuing without platform profile support\n",
+		err);
 	return 0;
 }
 #else
@@ -2326,22 +2335,22 @@ static int thermal_profile_setup(void)
 	if (is_omen_thermal_profile()) {
 		err = platform_profile_omen_get_ec(&active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		err = platform_profile_omen_set_ec(active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		platform_profile_handler.profile_get = platform_profile_omen_get_legacy;
 		platform_profile_handler.profile_set = platform_profile_omen_set_legacy;
 	} else if (is_victus_thermal_profile()) {
 		err = platform_profile_victus_get_ec(&active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		err = platform_profile_victus_set_ec(active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		platform_profile_handler.profile_get = platform_profile_victus_get_legacy;
 		platform_profile_handler.profile_set = platform_profile_victus_set_legacy;
@@ -2350,18 +2359,20 @@ static int thermal_profile_setup(void)
 
 		err = platform_profile_victus_s_set_ec(active_platform_profile);
 		if (err < 0)
-			return err;
+			goto disable_profile;
 
 		platform_profile_handler.profile_get = platform_profile_omen_get_legacy;
 		platform_profile_handler.profile_set = platform_profile_victus_s_set_legacy;
 	} else {
 		tp = thermal_profile_get();
-		if (tp < 0)
-			return tp;
+		if (tp < 0) {
+			err = tp;
+			goto disable_profile;
+		}
 
 		err = thermal_profile_set(tp);
 		if (err)
-			return err;
+			goto disable_profile;
 
 		platform_profile_handler.profile_get = hp_wmi_platform_profile_get_legacy;
 		platform_profile_handler.profile_set = hp_wmi_platform_profile_set_legacy;
@@ -2369,11 +2380,16 @@ static int thermal_profile_setup(void)
 
 	err = platform_profile_register(&platform_profile_handler);
 	if (err)
-		return err;
+		goto disable_profile;
 
 	pr_info("Registered as platform profile handler\n");
 	platform_profile_support = true;
 
+	return 0;
+
+disable_profile:
+	pr_warn("Platform profile init failed (%d); continuing without platform profile support\n",
+		err);
 	return 0;
 }
 #endif
