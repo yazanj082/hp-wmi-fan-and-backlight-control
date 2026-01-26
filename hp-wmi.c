@@ -1546,11 +1546,12 @@ static int __init hp_mc_leds_register(int num_zones)
 /* --- CUSTOM 4-ZONE RGB SUPPORT (SYSFS) --- */
 
 #define FOURZONE_COUNT 4
+#define FOURZONE_COLOR_OFFSET_START 25
 
 struct color_platform {
-	u8 blue;
-	u8 green;
 	u8 red;
+	u8 green;
+	u8 blue;
 } __packed;
 
 struct platform_zone {
@@ -1572,7 +1573,7 @@ static int fourzone_update_led(struct platform_zone *zone, enum hp_wmi_command r
 	int ret;
 
 	ret = hp_wmi_perform_query(HPWMI_COLOR_GET_QUERY, HPWMI_BACKLIGHT, &state,
-		sizeof(state), sizeof(state));
+		zero_if_sup(state), sizeof(state));
 
 	if (ret)
 		return ret <= 0 ? ret : -EINVAL;
@@ -1618,15 +1619,17 @@ static int parse_rgb(const char *buf, struct platform_zone *zone)
 
 	if (rgb > 0xFFFFFF) return -EINVAL;
 
-	repackager.package = rgb;
-	zone->colors = repackager.cp;
+	zone->colors.red = (rgb >> 16) & 0xFF;
+	zone->colors.green = (rgb >> 8) & 0xFF;
+	zone->colors.blue = rgb & 0xFF;
+
 	return 0;
 }
 
 static ssize_t zone_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct platform_zone *target_zone = match_zone(attr);
-	if (target_zone == NULL) return sprintf(buf, "none\n");
+	if (target_zone == NULL) { WARN_ON_ONCE(1); return -EIO; }
 
 	fourzone_update_led(target_zone, HPWMI_READ);
 	return sprintf(buf, "%02X%02X%02X\n",
@@ -1662,7 +1665,7 @@ static int fourzone_setup(struct platform_device *dev)
 	if (!zone_data) return -ENOMEM;
 
 	for (zone = 0; zone < FOURZONE_COUNT; zone++) {
-		sprintf(buffer, "zone%02hhX", zone);
+		sprintf(buffer, "zone%02X", zone);
 		name = kstrdup(buffer, GFP_KERNEL);
 		if (name == NULL) return -ENOMEM;
 		
@@ -1672,13 +1675,28 @@ static int fourzone_setup(struct platform_device *dev)
 		zone_dev_attrs[zone].show = zone_show;
 		zone_dev_attrs[zone].store = zone_set;
 		
-		zone_data[zone].offset = 25 + (zone * 3);
+		zone_data[zone].offset = FOURZONE_COLOR_OFFSET_START + (zone * 3);
 		zone_data[zone].attr = &zone_dev_attrs[zone];
 		zone_attrs[zone] = &zone_dev_attrs[zone].attr;
 	}
 	
 	zone_attribute_group.attrs = zone_attrs;
-	return sysfs_create_group(&dev->dev.kobj, &zone_attribute_group);
+	ret = sysfs_create_group(&dev->dev.kobj, &zone_attribute_group);
+	if (ret)
+		goto err_free_names;
+
+	return 0;
+
+// FIX: Error handling cleanup chain
+err_free_names:
+	while (--zone >= 0)
+		kfree(zone_dev_attrs[zone].attr.name);
+	kfree(zone_data);
+err_free_attrs:
+	kfree(zone_attrs);
+err_free_dev_attrs:
+	kfree(zone_dev_attrs);
+	return ret;
 }
 
 static int __init hp_kbd_rgb_setup(struct platform_device *device)
@@ -2580,8 +2598,19 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 static void __exit hp_wmi_bios_remove(struct platform_device *device)
 {
 	int i;
-	sysfs_remove_group(&device->dev.kobj, &zone_attribute_group);
+	
+	// FIX: Free memory allocated in fourzone_setup
+	if (zone_dev_attrs) {
+		sysfs_remove_group(&device->dev.kobj, &zone_attribute_group);
 
+		for (i = 0; i < FOURZONE_COUNT; i++) {
+			kfree(zone_dev_attrs[i].attr.name);
+		}
+		kfree(zone_data);
+		kfree(zone_attrs);
+		kfree(zone_dev_attrs);
+	}
+	
 	for (i = 0; i < rfkill2_count; i++) {
 		rfkill_unregister(rfkill2[i].rfkill);
 		rfkill_destroy(rfkill2[i].rfkill);
