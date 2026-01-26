@@ -1609,10 +1609,6 @@ static int parse_rgb(const char *buf, struct platform_zone *zone)
 {
 	long unsigned int rgb;
 	int ret;
-	union color_union {
-		struct color_platform cp;
-		int package;
-	} repackager;
 
 	ret = kstrtoul(buf, 16, &rgb);
 	if (ret) return ret;
@@ -1654,6 +1650,7 @@ static int fourzone_setup(struct platform_device *dev)
 	int zone;
 	char buffer[10];
 	char *name;
+	int ret;
 
 	zone_dev_attrs = kcalloc(FOURZONE_COUNT + 1, sizeof(struct device_attribute), GFP_KERNEL);
 	if (!zone_dev_attrs) return -ENOMEM;
