@@ -1421,7 +1421,7 @@ fail:
 static int hp_kbd_backlight_set_rgb_color(int zone, int red, int green, int blue)
 {
 	int ret;
-	u8 color_table[128]; 
+	u8 color_table[128] = {};
 
 	color_table[0] = HPWMI_COLOR_SET_QUERY;
 	// RGB color data starts at offset 25 +3 per zone, e.g. if zone 1 starts in 25 zone 2 starts in 28
@@ -1439,7 +1439,7 @@ static int hp_kbd_backlight_set_rgb_color(int zone, int red, int green, int blue
 }
 
 static bool hp_kbd_backlight_is_on(void) {
-	u8 data;
+	u8 data = 0;
 
 	hp_wmi_perform_query(HPWMI_BRIGHTNESS_GET_QUERY, HPWMI_BACKLIGHT, &data,
 				sizeof(data), sizeof(data));
@@ -1494,7 +1494,7 @@ static int hp_kbd_set_brightness(struct led_classdev *led_cdev,
 
 static int __init hp_mc_leds_register(int num_zones)
 {
-	u8 color_table[128]; 
+	u8 color_table[128] = {};
 
 	hp_wmi_perform_query(HPWMI_COLOR_GET_QUERY, HPWMI_BACKLIGHT,
 		  color_table, zero_if_sup(color_table),
@@ -1596,7 +1596,7 @@ static int fourzone_update_led(struct platform_zone *zone,
 			       enum hp_wmi_command read_or_write,
 			       const struct color_platform *write_colors)
 {
-	u8 state[128];
+	u8 state[128] = {};
 	int ret;
 
 	ret = hp_wmi_perform_query(HPWMI_COLOR_GET_QUERY, HPWMI_BACKLIGHT, state,
@@ -1762,9 +1762,13 @@ err_cleanup:
 
 static int __init hp_kbd_rgb_setup(struct platform_device *device)
 {
-	u8 keyboard_type;
-	hp_wmi_perform_query(HPWMI_KEYBOARD_TYPE_QUERY, HPWMI_GM, &keyboard_type,
-			 sizeof(keyboard_type), sizeof(keyboard_type));
+	int ret;
+	u8 keyboard_type = 0;
+
+	ret = hp_wmi_perform_query(HPWMI_KEYBOARD_TYPE_QUERY, HPWMI_GM, &keyboard_type,
+				   sizeof(keyboard_type), sizeof(keyboard_type));
+	if (ret)
+		return ret < 0 ? ret : -EINVAL;
 
 	switch (keyboard_type) {
 		case HP_KEYBOARD_TYPE_NORMAL:
@@ -1774,7 +1778,7 @@ static int __init hp_kbd_rgb_setup(struct platform_device *device)
 		case HP_KEYBOARD_TYPE_FOURZONE_WITHOUT_NUMPAD:
 			pr_info("keyboard type %d, four zone RGB keyboard support\n",
 				keyboard_type);
-			return fourzone_setup(device); 
+			return fourzone_setup(device);
 		case HP_KEYBOARD_TYPE_RGB_PER_KEY:
 			pr_info("per key-RGB keyboard detected but not supported yet\n");
 			return -ENODEV;
