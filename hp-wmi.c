@@ -347,6 +347,7 @@ static const struct key_entry hp_wmi_keymap[] = {
  * see omen_powersource_event.
  */
 static DEFINE_MUTEX(active_platform_profile_lock);
+static DEFINE_MUTEX(fourzone_led_lock);
 
 static struct input_dev *hp_wmi_input_dev;
 static struct input_dev *camera_shutter_input_dev;
@@ -1563,61 +1564,98 @@ struct platform_zone {
 static struct device_attribute *zone_dev_attrs;
 static struct attribute **zone_attrs;
 static struct platform_zone *zone_data;
+static bool fourzone_sysfs_group_created;
 static struct attribute_group zone_attribute_group = {
 	.name = "rgb_zones",
 };
 
-static int fourzone_update_led(struct platform_zone *zone, enum hp_wmi_command read_or_write)
+static void fourzone_cleanup(struct device *dev)
+{
+	int zone;
+
+	if (fourzone_sysfs_group_created) {
+		sysfs_remove_group(&dev->kobj, &zone_attribute_group);
+		fourzone_sysfs_group_created = false;
+	}
+
+	if (zone_dev_attrs) {
+		for (zone = 0; zone < FOURZONE_COUNT; zone++)
+			kfree(zone_dev_attrs[zone].attr.name);
+	}
+
+	kfree(zone_data);
+	zone_data = NULL;
+	kfree(zone_attrs);
+	zone_attrs = NULL;
+	kfree(zone_dev_attrs);
+	zone_dev_attrs = NULL;
+	zone_attribute_group.attrs = NULL;
+}
+
+static int fourzone_update_led(struct platform_zone *zone,
+			       enum hp_wmi_command read_or_write,
+			       const struct color_platform *write_colors)
 {
 	u8 state[128];
 	int ret;
 
-	ret = hp_wmi_perform_query(HPWMI_COLOR_GET_QUERY, HPWMI_BACKLIGHT, &state,
+	ret = hp_wmi_perform_query(HPWMI_COLOR_GET_QUERY, HPWMI_BACKLIGHT, state,
 		zero_if_sup(state), sizeof(state));
 
 	if (ret)
 		return ret <= 0 ? ret : -EINVAL;
 
 	if (read_or_write == HPWMI_WRITE) {
-		state[zone->offset + 0] = zone->colors.red;
-		state[zone->offset + 1] = zone->colors.green;
-		state[zone->offset + 2] = zone->colors.blue;
+		state[zone->offset + 0] = write_colors->red;
+		state[zone->offset + 1] = write_colors->green;
+		state[zone->offset + 2] = write_colors->blue;
 
-		ret = hp_wmi_perform_query(HPWMI_COLOR_SET_QUERY, HPWMI_BACKLIGHT, &state,
-				sizeof(state), sizeof(state));
-		return ret;
-	} else {
-		zone->colors.red = state[zone->offset + 0];
-		zone->colors.green = state[zone->offset + 1];
-		zone->colors.blue = state[zone->offset + 2];
+		ret = hp_wmi_perform_query(HPWMI_COLOR_SET_QUERY, HPWMI_BACKLIGHT, state,
+					   sizeof(state), sizeof(state));
+		if (ret)
+			return ret < 0 ? ret : -EINVAL;
+
+		zone->colors = *write_colors;
+		return 0;
 	}
+
+	zone->colors.red = state[zone->offset + 0];
+	zone->colors.green = state[zone->offset + 1];
+	zone->colors.blue = state[zone->offset + 2];
+
 	return 0;
 }
 
 static struct platform_zone *match_zone(struct device_attribute *attr)
 {
 	u8 zone;
+
+	if (!zone_data)
+		return NULL;
+
 	for (zone = 0; zone < FOURZONE_COUNT; zone++) {
-		if ((struct device_attribute *)zone_data[zone].attr == attr) {
+		if (zone_data[zone].attr == attr) {
 			return &zone_data[zone];
 		}
 	}
 	return NULL;
 }
 
-static int parse_rgb(const char *buf, struct platform_zone *zone)
+static int parse_rgb(const char *buf, struct color_platform *colors)
 {
 	long unsigned int rgb;
 	int ret;
 
 	ret = kstrtoul(buf, 16, &rgb);
-	if (ret) return ret;
+	if (ret)
+		return ret;
 
-	if (rgb > 0xFFFFFF) return -EINVAL;
+	if (rgb > 0xFFFFFF)
+		return -EINVAL;
 
-	zone->colors.red = (rgb >> 16) & 0xFF;
-	zone->colors.green = (rgb >> 8) & 0xFF;
-	zone->colors.blue = rgb & 0xFF;
+	colors->red = (rgb >> 16) & 0xFF;
+	colors->green = (rgb >> 8) & 0xFF;
+	colors->blue = rgb & 0xFF;
 
 	return 0;
 }
@@ -1625,9 +1663,19 @@ static int parse_rgb(const char *buf, struct platform_zone *zone)
 static ssize_t zone_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct platform_zone *target_zone = match_zone(attr);
-	if (target_zone == NULL) { WARN_ON_ONCE(1); return -EIO; }
+	int ret;
 
-	fourzone_update_led(target_zone, HPWMI_READ);
+	if (!target_zone) {
+		WARN_ON_ONCE(1);
+		return -EIO;
+	}
+
+	guard(mutex)(&fourzone_led_lock);
+
+	ret = fourzone_update_led(target_zone, HPWMI_READ, NULL);
+	if (ret)
+		return ret;
+
 	return sprintf(buf, "%02X%02X%02X\n",
 			 target_zone->colors.red,
 			 target_zone->colors.green,
@@ -1637,11 +1685,22 @@ static ssize_t zone_show(struct device *dev, struct device_attribute *attr, char
 static ssize_t zone_set(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
 {
 	struct platform_zone *target_zone = match_zone(attr);
-	if (target_zone == NULL) return -EINVAL;
+	struct color_platform colors;
+	int ret;
 
-	if (parse_rgb(buf, target_zone)) return -EINVAL;
-	
-	fourzone_update_led(target_zone, HPWMI_WRITE);
+	if (!target_zone)
+		return -EINVAL;
+
+	ret = parse_rgb(buf, &colors);
+	if (ret)
+		return ret;
+
+	guard(mutex)(&fourzone_led_lock);
+
+	ret = fourzone_update_led(target_zone, HPWMI_WRITE, &colors);
+	if (ret)
+		return ret;
+
 	return count;
 }
 
@@ -1653,46 +1712,51 @@ static int fourzone_setup(struct platform_device *dev)
 	int ret;
 
 	zone_dev_attrs = kcalloc(FOURZONE_COUNT + 1, sizeof(struct device_attribute), GFP_KERNEL);
-	if (!zone_dev_attrs) return -ENOMEM;
+	if (!zone_dev_attrs)
+		return -ENOMEM;
 
 	zone_attrs = kcalloc(FOURZONE_COUNT + 1, sizeof(struct attribute *), GFP_KERNEL);
-	if (!zone_attrs) return -ENOMEM;
+	if (!zone_attrs) {
+		ret = -ENOMEM;
+		goto err_cleanup;
+	}
 
 	zone_data = kcalloc(FOURZONE_COUNT, sizeof(struct platform_zone), GFP_KERNEL);
-	if (!zone_data) return -ENOMEM;
+	if (!zone_data) {
+		ret = -ENOMEM;
+		goto err_cleanup;
+	}
 
 	for (zone = 0; zone < FOURZONE_COUNT; zone++) {
 		sprintf(buffer, "zone%02X", zone);
 		name = kstrdup(buffer, GFP_KERNEL);
-		if (name == NULL) return -ENOMEM;
-		
+		if (!name) {
+			ret = -ENOMEM;
+			goto err_cleanup;
+		}
+
 		sysfs_attr_init(&zone_dev_attrs[zone].attr);
 		zone_dev_attrs[zone].attr.name = name;
 		zone_dev_attrs[zone].attr.mode = 0644;
 		zone_dev_attrs[zone].show = zone_show;
 		zone_dev_attrs[zone].store = zone_set;
-		
+
 		zone_data[zone].offset = FOURZONE_COLOR_OFFSET_START + (zone * 3);
 		zone_data[zone].attr = &zone_dev_attrs[zone];
 		zone_attrs[zone] = &zone_dev_attrs[zone].attr;
 	}
-	
+
 	zone_attribute_group.attrs = zone_attrs;
 	ret = sysfs_create_group(&dev->dev.kobj, &zone_attribute_group);
 	if (ret)
-		goto err_free_names;
+		goto err_cleanup;
+
+	fourzone_sysfs_group_created = true;
 
 	return 0;
 
-// FIX: Error handling cleanup chain
-err_free_names:
-	while (--zone >= 0)
-		kfree(zone_dev_attrs[zone].attr.name);
-	kfree(zone_data);
-err_free_attrs:
-	kfree(zone_attrs);
-err_free_dev_attrs:
-	kfree(zone_dev_attrs);
+err_cleanup:
+	fourzone_cleanup(&dev->dev);
 	return ret;
 }
 
@@ -2586,7 +2650,10 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 	#endif
 	if (err < 0)
 		return err;
-	hp_kbd_rgb_setup(device);
+	err = hp_kbd_rgb_setup(device);
+	if (err < 0 && err != -ENODEV)
+		pr_warn("RGB keyboard init failed (%d); continuing without RGB keyboard support\n",
+			err);
 
 
 	return 0;
@@ -2595,19 +2662,9 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 static void __exit hp_wmi_bios_remove(struct platform_device *device)
 {
 	int i;
-	
-	// FIX: Free memory allocated in fourzone_setup
-	if (zone_dev_attrs) {
-		sysfs_remove_group(&device->dev.kobj, &zone_attribute_group);
 
-		for (i = 0; i < FOURZONE_COUNT; i++) {
-			kfree(zone_dev_attrs[i].attr.name);
-		}
-		kfree(zone_data);
-		kfree(zone_attrs);
-		kfree(zone_dev_attrs);
-	}
-	
+	fourzone_cleanup(&device->dev);
+
 	for (i = 0; i < rfkill2_count; i++) {
 		rfkill_unregister(rfkill2[i].rfkill);
 		rfkill_destroy(rfkill2[i].rfkill);
