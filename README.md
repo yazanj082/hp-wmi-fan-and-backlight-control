@@ -67,11 +67,22 @@ sudo insmod hp-wmi.ko
 - Fn+P Shortcut: On laptops that support it, the Fn+P shortcut for switching performance profiles should work OOTB. You can verify if its working by monitoring the `/sys/firmware/acpi/platform_profile` file.
 
 ### Tested on:
-- Victus 16‑s1 (9Z791EA) — tested by me.
-- OMEN 16-wf0xxx (board 8BAB) — four-zone RGB reported working by PR author.
-- Victus 16-s0xxx (board 8BD4) — fan control validated, keyboard RGB behaved as single-zone in testing.
-- I need testers to report which models it works on or not. see https://github.com/Vilez0/hp-wmi-fan-and-backlight-control/issues/1
+- OMEN 16-wf0xxx (board 8BAB) — four-zone RGB reported working by the PR author.
+- Board 88D2 — four-zone keyboard backlight reported working.
+- Victus 16-s1011nt (8C9C) — reported working.
+- Victus 16-s0063nt (8BD4) — reported working.
+- Victus 16-S0022NT (8BD4) — reported working; fan speed readable via `lm-sensors`.
+- Victus 16-s0003nt (8BD4) — reported working.
+- Victus s0011ci (8BD4) — reported working; `Fn+P` is not supported by that BIOS.
+- HP Victus 16-s0177ng — reported working.
+- HP Victus 16-R1077NT (9J278EA) — fan and backlight reported working; `Fn+P` also reported working.
+- Victus 16-s0xxx (board 8BD4) — fan control validated locally here, but keyboard RGB behaved as a single physical zone in testing.
+- Victus 15-fa10010nt (8BC4) — fan control works with `force_fan_control_support=true`; no backlight support.
+- Victus 15-fa1031nt — fan control works with `force_fan_control_support=true`; backlight unsupported and reported `fan*_max` reads as `0`.
+- HP Victus 15-fb1013dx — fan settings work with `force_fan_control_support=true`; backlight control unavailable.
+- HP Victus 15-fa0031dx (8A50) — fan target settings work with `force_fan_control_support=true`; backlight control unavailable.
+
+More reports and discussion: https://github.com/TUXOV/hp-wmi-fan-and-backlight-control/issues/1
 
 ### Disclaimer
 USE IT AT YOUR OWN RISK. I DO NOT ACCEPT ANY RESPONSIBILITY.
-
