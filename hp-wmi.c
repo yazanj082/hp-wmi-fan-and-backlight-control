@@ -101,7 +101,7 @@ static const char * const victus_thermal_profile_boards[] = {
 
 /* DMI Board names of Victus 16-r and Victus 16-s laptops */
 static const char * const victus_s_thermal_profile_boards[] = {
-	"8BBE", "8BD4", "8BD5", "8C99", "8C9C"
+	"8BBE", "8BD4", "8BD5", "8C99", "8C9C", "8BAB"
 };
 
 enum hp_wmi_radio {
@@ -347,6 +347,7 @@ static const struct key_entry hp_wmi_keymap[] = {
  * see omen_powersource_event.
  */
 static DEFINE_MUTEX(active_platform_profile_lock);
+static DEFINE_MUTEX(fourzone_led_lock);
 
 static struct input_dev *hp_wmi_input_dev;
 static struct input_dev *camera_shutter_input_dev;
@@ -1420,7 +1421,7 @@ fail:
 static int hp_kbd_backlight_set_rgb_color(int zone, int red, int green, int blue)
 {
 	int ret;
-	u8 color_table[128]; 
+	u8 color_table[128] = {};
 
 	color_table[0] = HPWMI_COLOR_SET_QUERY;
 	// RGB color data starts at offset 25 +3 per zone, e.g. if zone 1 starts in 25 zone 2 starts in 28
@@ -1438,7 +1439,7 @@ static int hp_kbd_backlight_set_rgb_color(int zone, int red, int green, int blue
 }
 
 static bool hp_kbd_backlight_is_on(void) {
-	u8 data;
+	u8 data = 0;
 
 	hp_wmi_perform_query(HPWMI_BRIGHTNESS_GET_QUERY, HPWMI_BACKLIGHT, &data,
 				sizeof(data), sizeof(data));
@@ -1484,12 +1485,16 @@ static int hp_kbd_set_brightness(struct led_classdev *led_cdev,
             break;
         }
 	}
+
+	if (zone == ARRAY_SIZE(hp_multicolor_leds.devices))
+        return -EINVAL;
+
 	return hp_kbd_backlight_set_rgb_color(zone, red, green, blue);
 }
 
 static int __init hp_mc_leds_register(int num_zones)
 {
-	u8 color_table[128]; 
+	u8 color_table[128] = {};
 
 	hp_wmi_perform_query(HPWMI_COLOR_GET_QUERY, HPWMI_BACKLIGHT,
 		  color_table, zero_if_sup(color_table),
@@ -1539,11 +1544,231 @@ static int __init hp_mc_leds_register(int num_zones)
 	return 0;
 }
 
-static int __init hp_kbd_rgb_setup(void)
+/* --- CUSTOM 4-ZONE RGB SUPPORT (SYSFS) --- */
+
+#define FOURZONE_COUNT 4
+#define FOURZONE_COLOR_OFFSET_START 25
+
+struct color_platform {
+	u8 red;
+	u8 green;
+	u8 blue;
+} __packed;
+
+struct platform_zone {
+	u8 offset;
+	struct device_attribute *attr;
+	struct color_platform colors;
+};
+
+static struct device_attribute *zone_dev_attrs;
+static struct attribute **zone_attrs;
+static struct platform_zone *zone_data;
+static bool fourzone_sysfs_group_created;
+static struct attribute_group zone_attribute_group = {
+	.name = "rgb_zones",
+};
+
+static void fourzone_cleanup(struct device *dev)
 {
-	u8 keyboard_type;
-	hp_wmi_perform_query(HPWMI_KEYBOARD_TYPE_QUERY, HPWMI_GM, &keyboard_type,
-			 sizeof(keyboard_type), sizeof(keyboard_type));
+	int zone;
+
+	if (fourzone_sysfs_group_created) {
+		sysfs_remove_group(&dev->kobj, &zone_attribute_group);
+		fourzone_sysfs_group_created = false;
+	}
+
+	if (zone_dev_attrs) {
+		for (zone = 0; zone < FOURZONE_COUNT; zone++)
+			kfree(zone_dev_attrs[zone].attr.name);
+	}
+
+	kfree(zone_data);
+	zone_data = NULL;
+	kfree(zone_attrs);
+	zone_attrs = NULL;
+	kfree(zone_dev_attrs);
+	zone_dev_attrs = NULL;
+	zone_attribute_group.attrs = NULL;
+}
+
+static int fourzone_update_led(struct platform_zone *zone,
+			       enum hp_wmi_command read_or_write,
+			       const struct color_platform *write_colors)
+{
+	u8 state[128] = {};
+	int ret;
+
+	ret = hp_wmi_perform_query(HPWMI_COLOR_GET_QUERY, HPWMI_BACKLIGHT, state,
+		zero_if_sup(state), sizeof(state));
+
+	if (ret)
+		return ret <= 0 ? ret : -EINVAL;
+
+	if (read_or_write == HPWMI_WRITE) {
+		state[zone->offset + 0] = write_colors->red;
+		state[zone->offset + 1] = write_colors->green;
+		state[zone->offset + 2] = write_colors->blue;
+
+		ret = hp_wmi_perform_query(HPWMI_COLOR_SET_QUERY, HPWMI_BACKLIGHT, state,
+					   sizeof(state), sizeof(state));
+		if (ret)
+			return ret < 0 ? ret : -EINVAL;
+
+		zone->colors = *write_colors;
+		return 0;
+	}
+
+	zone->colors.red = state[zone->offset + 0];
+	zone->colors.green = state[zone->offset + 1];
+	zone->colors.blue = state[zone->offset + 2];
+
+	return 0;
+}
+
+static struct platform_zone *match_zone(struct device_attribute *attr)
+{
+	u8 zone;
+
+	if (!zone_data)
+		return NULL;
+
+	for (zone = 0; zone < FOURZONE_COUNT; zone++) {
+		if (zone_data[zone].attr == attr) {
+			return &zone_data[zone];
+		}
+	}
+	return NULL;
+}
+
+static int parse_rgb(const char *buf, struct color_platform *colors)
+{
+	long unsigned int rgb;
+	int ret;
+
+	ret = kstrtoul(buf, 16, &rgb);
+	if (ret)
+		return ret;
+
+	if (rgb > 0xFFFFFF)
+		return -EINVAL;
+
+	colors->red = (rgb >> 16) & 0xFF;
+	colors->green = (rgb >> 8) & 0xFF;
+	colors->blue = rgb & 0xFF;
+
+	return 0;
+}
+
+static ssize_t zone_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct platform_zone *target_zone = match_zone(attr);
+	int ret;
+
+	if (!target_zone) {
+		WARN_ON_ONCE(1);
+		return -EIO;
+	}
+
+	guard(mutex)(&fourzone_led_lock);
+
+	ret = fourzone_update_led(target_zone, HPWMI_READ, NULL);
+	if (ret)
+		return ret;
+
+	return sprintf(buf, "%02X%02X%02X\n",
+			 target_zone->colors.red,
+			 target_zone->colors.green,
+			 target_zone->colors.blue);
+}
+
+static ssize_t zone_set(struct device *dev, struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct platform_zone *target_zone = match_zone(attr);
+	struct color_platform colors;
+	int ret;
+
+	if (!target_zone)
+		return -EINVAL;
+
+	ret = parse_rgb(buf, &colors);
+	if (ret)
+		return ret;
+
+	guard(mutex)(&fourzone_led_lock);
+
+	ret = fourzone_update_led(target_zone, HPWMI_WRITE, &colors);
+	if (ret)
+		return ret;
+
+	return count;
+}
+
+static int fourzone_setup(struct platform_device *dev)
+{
+	int zone;
+	char buffer[10];
+	char *name;
+	int ret;
+
+	zone_dev_attrs = kcalloc(FOURZONE_COUNT + 1, sizeof(struct device_attribute), GFP_KERNEL);
+	if (!zone_dev_attrs)
+		return -ENOMEM;
+
+	zone_attrs = kcalloc(FOURZONE_COUNT + 1, sizeof(struct attribute *), GFP_KERNEL);
+	if (!zone_attrs) {
+		ret = -ENOMEM;
+		goto err_cleanup;
+	}
+
+	zone_data = kcalloc(FOURZONE_COUNT, sizeof(struct platform_zone), GFP_KERNEL);
+	if (!zone_data) {
+		ret = -ENOMEM;
+		goto err_cleanup;
+	}
+
+	for (zone = 0; zone < FOURZONE_COUNT; zone++) {
+		sprintf(buffer, "zone%02X", zone);
+		name = kstrdup(buffer, GFP_KERNEL);
+		if (!name) {
+			ret = -ENOMEM;
+			goto err_cleanup;
+		}
+
+		sysfs_attr_init(&zone_dev_attrs[zone].attr);
+		zone_dev_attrs[zone].attr.name = name;
+		zone_dev_attrs[zone].attr.mode = 0644;
+		zone_dev_attrs[zone].show = zone_show;
+		zone_dev_attrs[zone].store = zone_set;
+
+		zone_data[zone].offset = FOURZONE_COLOR_OFFSET_START + (zone * 3);
+		zone_data[zone].attr = &zone_dev_attrs[zone];
+		zone_attrs[zone] = &zone_dev_attrs[zone].attr;
+	}
+
+	zone_attribute_group.attrs = zone_attrs;
+	ret = sysfs_create_group(&dev->dev.kobj, &zone_attribute_group);
+	if (ret)
+		goto err_cleanup;
+
+	fourzone_sysfs_group_created = true;
+
+	return 0;
+
+err_cleanup:
+	fourzone_cleanup(&dev->dev);
+	return ret;
+}
+
+static int __init hp_kbd_rgb_setup(struct platform_device *device)
+{
+	int ret;
+	u8 keyboard_type = 0;
+
+	ret = hp_wmi_perform_query(HPWMI_KEYBOARD_TYPE_QUERY, HPWMI_GM, &keyboard_type,
+				   sizeof(keyboard_type), sizeof(keyboard_type));
+	if (ret)
+		return ret < 0 ? ret : -EINVAL;
 
 	switch (keyboard_type) {
 		case HP_KEYBOARD_TYPE_NORMAL:
@@ -1553,8 +1778,7 @@ static int __init hp_kbd_rgb_setup(void)
 		case HP_KEYBOARD_TYPE_FOURZONE_WITHOUT_NUMPAD:
 			pr_info("keyboard type %d, four zone RGB keyboard support\n",
 				keyboard_type);
-			// return hp_mc_leds_register(4); WIP
-			return -ENODEV;
+			return fourzone_setup(device);
 		case HP_KEYBOARD_TYPE_RGB_PER_KEY:
 			pr_info("per key-RGB keyboard detected but not supported yet\n");
 			return -ENODEV;
@@ -2430,7 +2654,10 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 	#endif
 	if (err < 0)
 		return err;
-	hp_kbd_rgb_setup();
+	err = hp_kbd_rgb_setup(device);
+	if (err < 0 && err != -ENODEV)
+		pr_warn("RGB keyboard init failed (%d); continuing without RGB keyboard support\n",
+			err);
 
 
 	return 0;
@@ -2439,6 +2666,8 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 static void __exit hp_wmi_bios_remove(struct platform_device *device)
 {
 	int i;
+
+	fourzone_cleanup(&device->dev);
 
 	for (i = 0; i < rfkill2_count; i++) {
 		rfkill_unregister(rfkill2[i].rfkill);

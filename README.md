@@ -1,6 +1,9 @@
 ## hp-wmi manual fan + keyboard RGB control
 
-This is an Initial module for manual fan control and keyboard RGB for devices that support it. Single‑zone RGB works now; I plan to add 4‑zone but I need testers.
+This is an Initial module for manual fan control and keyboard RGB for devices that support it.
+
+> [!IMPORTANT]
+> Four-zone RGB support in this branch is currently scoped to hardware that actually exposes four physical lighting zones. It was reported working by the PR author on **OMEN 16-wf0xxx (board 8BAB)**. On **Victus 16-s0xxx / board 8BD4**, fan control works, but keyboard RGB still behaves as a single physical zone in testing.
 
 > [!NOTE]
 > **HP Victus 15:** For some reason, HP didnt mark manual fan control supported on HP Victus 15 laptops, even though the hardware supports it. So by default manual fan control is not enabled in this module. But if you want to turn it on, load the module with the `force_fan_control_support=true` parameter.
@@ -45,6 +48,16 @@ sudo insmod hp-wmi.ko
     echo 128 | sudo tee /sys/class/leds/hp::kbd_backlight/brightness # Change brightness to 50% (0-255)
     ```
 
+- Keyboard (four-zone RGB, supported hardware only): control under `/sys/devices/platform/hp-wmi/rgb_zones/`.
+  - Files `zone00` through `zone03` accept `RRGGBB` hex values.
+  - Example:
+    ```bash
+    echo FF0000 | sudo tee /sys/devices/platform/hp-wmi/rgb_zones/zone00
+    echo 00FF00 | sudo tee /sys/devices/platform/hp-wmi/rgb_zones/zone01
+    echo 0000FF | sudo tee /sys/devices/platform/hp-wmi/rgb_zones/zone02
+    echo FFFFFF | sudo tee /sys/devices/platform/hp-wmi/rgb_zones/zone03
+    ```
+
 - Fans: control via `fanX_target` files (check fanX_max for the max values. Anything above the max values will return -EINVAL).
     ```bash
     echo 5500 | sudo tee /sys/devices/platform/hp-wmi/hwmon/hwmon*/fan1_target  # will set fan1 to 5500 rpm
@@ -55,9 +68,10 @@ sudo insmod hp-wmi.ko
 
 ### Tested on:
 - Victus 16‑s1 (9Z791EA) — tested by me.
+- OMEN 16-wf0xxx (board 8BAB) — four-zone RGB reported working by PR author.
+- Victus 16-s0xxx (board 8BD4) — fan control validated, keyboard RGB behaved as single-zone in testing.
 - I need testers to report which models it works on or not. see https://github.com/Vilez0/hp-wmi-fan-and-backlight-control/issues/1
 
 ### Disclaimer
 USE IT AT YOUR OWN RISK. I DO NOT ACCEPT ANY RESPONSIBILITY.
-
 
