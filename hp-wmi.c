@@ -104,6 +104,18 @@ static const char * const victus_s_thermal_profile_boards[] = {
 	"8BBE", "8BD4", "8BD5", "8C99", "8C9C", "8BAB"
 };
 
+static const char * const omen_rgb_boards[] = {
+	"8A25", "8A97", "8974", "8BBE"
+};
+
+static bool is_omen_rgb_board(void)
+{
+	const char *board_name = dmi_get_system_info(DMI_BOARD_NAME);
+	if (!board_name)
+		return false;
+	return match_string(omen_rgb_boards, ARRAY_SIZE(omen_rgb_boards), board_name) >= 0;
+}
+
 enum hp_wmi_radio {
 	HPWMI_WIFI	= 0x0,
 	HPWMI_BLUETOOTH	= 0x1,
@@ -1615,6 +1627,11 @@ static int fourzone_update_led(struct platform_zone *zone,
 		if (ret)
 			return ret < 0 ? ret : -EINVAL;
 
+		/* Sync BIOS backlight state to ON whenever we set a color in the app */
+		u8 data = HP_BACKLIGHT_ON;
+		hp_wmi_perform_query(HPWMI_WRITE, HPWMI_BACKLIGHT, &data,
+					   sizeof(data), sizeof(data));
+
 		zone->colors = *write_colors;
 		return 0;
 	}
@@ -1769,6 +1786,11 @@ static int __init hp_kbd_rgb_setup(struct platform_device *device)
 				   sizeof(keyboard_type), sizeof(keyboard_type));
 	if (ret)
 		return ret < 0 ? ret : -EINVAL;
+
+	if (is_omen_rgb_board()) {
+		pr_info("Omen RGB board whitelist match, forcing 4-zone RGB support\n");
+		keyboard_type = HP_KEYBOARD_TYPE_FOURZONE_WITH_NUMPAD;
+	}
 
 	switch (keyboard_type) {
 		case HP_KEYBOARD_TYPE_NORMAL:
